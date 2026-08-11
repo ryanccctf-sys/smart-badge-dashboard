@@ -1,0 +1,6 @@
+{
+  "name": "智能工牌全国运营态势大屏",
+  "description": "智能工牌全国实时运营指挥中心，覆盖汽车零售门店、实时VOC客户之声、AI销售对话分析与全国数据大屏",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
