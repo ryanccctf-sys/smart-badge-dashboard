@@ -1,8 +1,9 @@
-import React, { useState, useEffect } from 'react';
-import { CHINA_MAP_PATHS } from '../data/chinaMapSvgPaths';
+import React, { useState, useEffect, useMemo } from 'react';
+import * as d3Geo from 'd3-geo';
+import chinaGeoJsonRaw from '../data/chinaGeoJson.json';
 import { CITY_NODES, PROVINCES_DATA } from '../data/mockData';
-import { ProvinceData, CityNode, Brand } from '../types';
-import { Activity, Mic, Cpu, Radio, Sparkles, Building2, Users } from 'lucide-react';
+import { ProvinceData, Brand } from '../types';
+import { Activity, Mic, Cpu, Radio, Building2, Users, Layers, Sparkles } from 'lucide-react';
 
 interface ChinaMapProps {
   selectedBrand: Brand;
@@ -13,6 +14,40 @@ interface ChinaMapProps {
   totalAudioHours: number;
 }
 
+const geoData = chinaGeoJsonRaw as any;
+
+// Helper to calculate exact visual centroid of a feature geometry
+function calculateCentroid(feature: any, proj: d3Geo.GeoProjection): [number, number] {
+  let totalLng = 0, totalLat = 0, count = 0;
+  function traverse(coords: any) {
+    if (typeof coords[0] === 'number') {
+      totalLng += coords[0];
+      totalLat += coords[1];
+      count++;
+    } else if (Array.isArray(coords)) {
+      coords.forEach(traverse);
+    }
+  }
+  traverse(feature.geometry.coordinates);
+  if (count === 0) return [500, 400];
+  const projected = proj([totalLng / count, totalLat / count]);
+  return projected || [500, 400];
+}
+
+// Shorten official full name to 2-3 characters
+function getShortName(fullName: string): string {
+  if (!fullName) return '';
+  if (fullName.startsWith('内蒙古')) return '内蒙古';
+  if (fullName.startsWith('黑龙江')) return '黑龙江';
+  if (fullName.startsWith('香港')) return '香港';
+  if (fullName.startsWith('澳门')) return '澳门';
+  if (fullName.startsWith('新疆')) return '新疆';
+  if (fullName.startsWith('西藏')) return '西藏';
+  if (fullName.startsWith('广西')) return '广西';
+  if (fullName.startsWith('宁夏')) return '宁夏';
+  return fullName.substring(0, 2);
+}
+
 export const ChinaMap: React.FC<ChinaMapProps> = ({
   selectedBrand,
   onSelectProvince,
@@ -21,24 +56,25 @@ export const ChinaMap: React.FC<ChinaMapProps> = ({
   todaySessions,
   totalAudioHours,
 }) => {
+  const [mapTheme, setMapTheme] = useState<'cyber' | 'techNavy'>('cyber');
   const [hoveredProvince, setHoveredProvince] = useState<ProvinceData | null>(null);
   const [hoverPos, setHoverPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [activeBubble, setActiveBubble] = useState<{ cityId: string; text: string } | null>({
     cityId: 'shanghai',
-    text: '当前使用 186人',
+    text: '上海 · 当前在线 186台工牌',
   });
 
-  // Cycle real-time usage bubbles across major cities
+  // Cycle real-time usage speech bubbles across major cities
   useEffect(() => {
     const bubbleTexts = [
-      '当前使用 126人',
+      '当前在线 186台工牌',
       '今日会话 1,286条',
       '正在进行AI语音转写',
       '提炼VOC热点：冬季续航',
       '识别到高意向增换购客户',
       '生成优秀谈判标杆案例',
-      '当前在线工牌 86台',
       '实时音轨采集分析中',
+      '置换补贴政策高频询问',
     ];
 
     const timer = setInterval(() => {
@@ -50,16 +86,67 @@ export const ChinaMap: React.FC<ChinaMapProps> = ({
     return () => clearInterval(timer);
   }, []);
 
+  // Set up d3 Mercator projection specifically for China
+  const { projection, pathGenerator } = useMemo(() => {
+    const proj = d3Geo
+      .geoMercator()
+      .center([104.0, 36.5])
+      .scale(880)
+      .translate([500, 420]);
+
+    const pathGen = d3Geo.geoPath().projection(proj);
+    return { projection: proj, pathGenerator: pathGen };
+  }, []);
+
+  // Pre-calculate features with paths, centroids, and metadata (Excluding 100000_JD sea box)
+  const { featureList, seaBoundaryFeature } = useMemo(() => {
+    const validFeatures: any[] = [];
+    let seaFeat: any = null;
+
+    geoData.features.forEach((feature: any, idx: number) => {
+      if (feature.properties.adcode === '100000_JD') {
+        seaFeat = {
+          id: 'sea-jd',
+          path: pathGenerator(feature) || '',
+        };
+        return;
+      }
+
+      const name = feature.properties.name || '';
+      const shortName = getShortName(name);
+      const path = pathGenerator(feature) || '';
+      const centroid = calculateCentroid(feature, projection);
+
+      const provData = PROVINCES_DATA.find(
+        (p) =>
+          p.name === name ||
+          p.name.startsWith(shortName) ||
+          name.startsWith(p.name.slice(0, 2))
+      );
+
+      validFeatures.push({
+        id: feature.id || `feat-${idx}`,
+        fullName: name,
+        shortName,
+        path,
+        centroid,
+        provData,
+      });
+    });
+
+    return { featureList: validFeatures, seaBoundaryFeature: seaFeat };
+  }, [pathGenerator, projection]);
+
   const getProvinceDataByName = (name: string): ProvinceData | undefined => {
     return PROVINCES_DATA.find(
       (p) => p.name === name || p.name.startsWith(name.slice(0, 2))
     );
   };
 
-  const handleProvinceMouseMove = (e: React.MouseEvent, provName: string) => {
-    const pData = getProvinceDataByName(provName);
-    if (pData) {
-      setHoveredProvince(pData);
+  const handleProvinceMouseMove = (e: React.MouseEvent, provData?: ProvinceData, fullName?: string) => {
+    const targetProv = provData || (fullName ? getProvinceDataByName(fullName) : undefined);
+    if (targetProv) {
+      setHoveredProvince(targetProv);
       const bounds = e.currentTarget.getBoundingClientRect();
       setHoverPos({
         x: e.clientX - bounds.left,
@@ -76,224 +163,252 @@ export const ChinaMap: React.FC<ChinaMapProps> = ({
   const isBrandFiltered = selectedBrand.id !== 'all';
   const brandScale = isBrandFiltered ? selectedBrand.totalStores / 1286 : 1;
 
-  return (
-    <div className="relative w-full h-full min-h-[520px] flex flex-col justify-between rounded-xl border border-cyan-500/20 bg-slate-950/70 p-4 backdrop-blur-md overflow-hidden shadow-2xl">
-      {/* Background Tech Grid Lines */}
-      <div className="absolute inset-0 bg-[radial-gradient(#1e293b_1px,transparent_1px)] [background-size:24px_24px] opacity-30 pointer-events-none" />
-      <div className="absolute top-0 right-0 w-96 h-96 bg-cyan-500/10 blur-[120px] rounded-full pointer-events-none" />
-      <div className="absolute bottom-0 left-0 w-96 h-96 bg-blue-600/10 blur-[120px] rounded-full pointer-events-none" />
+  // Province Fill Color Palette
+  const getProvinceFill = (prov?: ProvinceData, isHovered?: boolean) => {
+    if (isHovered) return mapTheme === 'cyber' ? '#06b6d4' : '#38bdf8';
 
-      {/* Top Map Header Bar */}
-      <div className="relative z-10 flex items-center justify-between border-b border-slate-800/80 pb-3 mb-2">
+    if (!prov) return mapTheme === 'cyber' ? '#0f172a' : '#1e293b';
+
+    if (mapTheme === 'cyber') {
+      switch (prov.densityLevel) {
+        case 'high':
+          return '#0284c7'; // Cyan 600
+        case 'medium':
+          return '#0369a1'; // Sky 700
+        case 'low':
+        default:
+          return '#0f172a'; // Dark Slate 900
+      }
+    } else {
+      // Tech Navy Mode
+      switch (prov.densityLevel) {
+        case 'high':
+          return '#2563eb'; // Blue 600
+        case 'medium':
+          return '#1d4ed8'; // Blue 700
+        case 'low':
+        default:
+          return '#1e293b'; // Slate 800
+      }
+    }
+  };
+
+  return (
+    <div className="relative w-full h-full min-h-[580px] flex flex-col justify-between rounded-2xl border border-slate-800/80 bg-slate-950/90 text-white backdrop-blur-md p-4 transition-all duration-300 overflow-hidden shadow-2xl">
+      {/* Top Header Bar */}
+      <div className="relative z-20 flex items-center justify-between border-b border-slate-800/80 pb-3 mb-2 gap-2 flex-wrap">
         <div className="flex items-center space-x-3">
           <div className="relative flex items-center justify-center w-8 h-8 rounded-lg bg-cyan-500/10 border border-cyan-500/30 text-cyan-400">
             <Radio className="w-4 h-4 animate-pulse" />
           </div>
           <div>
-            <h2 className="text-base font-bold text-white tracking-wide flex items-center gap-2">
+            <h2 className="text-base font-bold tracking-wide flex items-center gap-2 text-slate-100">
               全国工牌实时网络地图
-              <span className="text-xs px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-normal">
-                {selectedBrand.name} 覆盖视界
+              <span className="text-xs px-2.5 py-0.5 rounded-full border bg-cyan-500/20 text-cyan-300 border-cyan-500/30 font-medium">
+                {selectedBrand.name} 视角
               </span>
             </h2>
-            <p className="text-xs text-slate-400">点击省份查看该区域城市与门店实时分布</p>
+            <p className="text-xs text-slate-400">100% 真实地理行政边界与分布式智能节点网格</p>
           </div>
         </div>
 
-        {/* Legend */}
-        <div className="hidden sm:flex items-center space-x-4 text-xs text-slate-300 bg-slate-900/80 px-3 py-1.5 rounded-lg border border-slate-800">
-          <span className="flex items-center gap-1.5">
-            <span className="w-3 h-3 rounded-sm bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.8)]" />
-            高覆盖区域
-          </span>
-          <span className="flex items-center gap-1.5">
-            <span className="w-3 h-3 rounded-sm bg-blue-500/80" />
-            中度覆盖
-          </span>
-          <span className="flex items-center gap-1.5">
-            <span className="w-3 h-3 rounded-sm bg-slate-700" />
-            标准覆盖
-          </span>
-          <span className="flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
-            实时使用热点
-          </span>
+        {/* Theme Switcher Buttons */}
+        <div className="flex items-center space-x-2">
+          <div className="flex items-center bg-slate-900 p-1 rounded-lg text-xs font-medium border border-slate-800">
+            <button
+              onClick={() => setMapTheme('cyber')}
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-md transition-all ${
+                mapTheme === 'cyber'
+                  ? 'bg-cyan-500 text-slate-950 shadow-[0_0_12px_rgba(6,182,212,0.5)] font-bold'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              赛博黑青
+            </button>
+            <button
+              onClick={() => setMapTheme('techNavy')}
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-md transition-all ${
+                mapTheme === 'techNavy'
+                  ? 'bg-blue-600 text-white shadow-[0_0_12px_rgba(37,99,235,0.5)] font-bold'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Layers className="w-3.5 h-3.5" />
+              科技深蓝
+            </button>
+          </div>
         </div>
       </div>
 
-      {/* Main Map SVG Area */}
-      <div className="relative flex-1 w-full flex items-center justify-center my-auto min-h-[400px]">
+      {/* Main Map Canvas Area */}
+      <div className="relative flex-1 w-full min-h-[480px] flex items-center justify-center bg-slate-950/60 rounded-xl overflow-hidden border border-slate-900">
         <svg
           viewBox="0 0 1000 800"
-          className="w-full h-full max-h-[580px] drop-shadow-[0_0_25px_rgba(6,182,212,0.15)] transition-all duration-500 select-none"
+          className="w-full h-full max-h-[560px] drop-shadow-2xl transition-all duration-500 select-none"
         >
-          {/* Defs for Glow Filters and Gradients */}
           <defs>
-            <filter id="glow-high" x="-20%" y="-20%" width="140%" height="140%">
-              <feGaussianBlur stdDeviation="4" result="blur" />
-              <feComposite in="SourceGraphic" in2="blur" operator="over" />
-            </filter>
-            <filter id="node-glow" x="-50%" y="-50%" width="200%" height="200%">
+            {/* Tech Grid Pattern */}
+            <pattern id="map-tech-grid" width="30" height="30" patternUnits="userSpaceOnUse">
+              <path d="M 30 0 L 0 0 0 30" fill="none" stroke="#1e293b" strokeWidth="0.6" strokeOpacity="0.4" />
+            </pattern>
+
+            <filter id="city-glow" x="-50%" y="-50%" width="200%" height="200%">
               <feGaussianBlur stdDeviation="3" result="blur" />
               <feComposite in="SourceGraphic" in2="blur" operator="over" />
             </filter>
 
-            <linearGradient id="highGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="#0284c7" stopOpacity="0.75" />
-              <stop offset="100%" stopColor="#06b6d4" stopOpacity="0.85" />
-            </linearGradient>
-
-            <linearGradient id="medGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="#1e3a8a" stopOpacity="0.6" />
-              <stop offset="100%" stopColor="#0284c7" stopOpacity="0.65" />
-            </linearGradient>
-
-            <linearGradient id="lowGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="#0f172a" stopOpacity="0.8" />
-              <stop offset="100%" stopColor="#1e293b" stopOpacity="0.9" />
-            </linearGradient>
+            <filter id="province-glow" x="-20%" y="-20%" width="140%" height="140%">
+              <feDropShadow dx="0" dy="2" stdDeviation="4" floodColor="#0284c7" floodOpacity="0.3" />
+            </filter>
           </defs>
 
-          {/* Render Provinces */}
-          <g className="provinces-group">
-            {CHINA_MAP_PATHS.map((p) => {
-              const pData = getProvinceDataByName(p.name);
-              const isHigh = pData?.densityLevel === 'high';
-              const isMed = pData?.densityLevel === 'medium';
-              const isHovered = hoveredProvince?.name === pData?.name;
+          {/* Grid Background */}
+          <rect width="1000" height="800" fill="url(#map-tech-grid)" />
 
-              let fillStyle = 'url(#lowGrad)';
-              let strokeStyle = '#334155';
-              let strokeWidth = '1';
+          {/* Optional Sea Boundary (Nine-dash Line Dashed Strokes) */}
+          {seaBoundaryFeature && (
+            <path
+              d={seaBoundaryFeature.path}
+              fill="none"
+              stroke="#38bdf8"
+              strokeWidth="1"
+              strokeDasharray="4 3"
+              strokeOpacity="0.5"
+            />
+          )}
 
-              if (pData) {
-                if (isHigh) {
-                  fillStyle = 'url(#highGrad)';
-                  strokeStyle = '#38bdf8';
-                  strokeWidth = isHovered ? '2.5' : '1.5';
-                } else if (isMed) {
-                  fillStyle = 'url(#medGrad)';
-                  strokeStyle = '#0284c7';
-                  strokeWidth = isHovered ? '2.2' : '1.2';
-                } else {
-                  fillStyle = 'url(#lowGrad)';
-                  strokeStyle = '#3b82f6';
-                  strokeWidth = isHovered ? '2' : '1';
-                }
-              }
+          {/* Render Provinces with Clear Outlines & High-Tech Fills */}
+          <g className="provinces-layer" filter="url(#province-glow)">
+            {featureList.map((item) => {
+              const isHovered = hoveredProvince?.name === item.provData?.name;
+              const fill = getProvinceFill(item.provData, isHovered);
 
               return (
                 <path
-                  key={p.id}
-                  d={p.path}
-                  fill={isHovered ? '#0ea5e9' : fillStyle}
-                  stroke={isHovered ? '#38bdf8' : strokeStyle}
-                  strokeWidth={strokeWidth}
-                  filter={isHigh || isHovered ? 'url(#glow-high)' : undefined}
-                  className="cursor-pointer transition-all duration-200 hover:brightness-125"
-                  onMouseMove={(e) => handleProvinceMouseMove(e, p.name)}
+                  key={item.id}
+                  d={item.path}
+                  fill={fill}
+                  stroke={
+                    isHovered
+                      ? '#ffffff'
+                      : mapTheme === 'cyber'
+                      ? '#38bdf8'
+                      : '#60a5fa'
+                  }
+                  strokeWidth={isHovered ? '2' : '1.2'}
+                  strokeLinejoin="round"
+                  strokeOpacity={isHovered ? '1' : '0.85'}
+                  className="cursor-pointer transition-all duration-150 hover:brightness-125"
+                  onMouseMove={(e) => handleProvinceMouseMove(e, item.provData, item.fullName)}
                   onMouseLeave={handleProvinceMouseLeave}
-                  onClick={() => pData && onSelectProvince(pData)}
+                  onClick={() => item.provData && onSelectProvince(item.provData)}
                 />
               );
             })}
           </g>
 
-          {/* City Nodes */}
-          <g className="cities-group">
+          {/* Render Province Text Labels */}
+          <g className="province-labels-layer pointer-events-none">
+            {featureList.map((item) => {
+              if (!item.shortName || !item.centroid) return null;
+              const [cx, cy] = item.centroid;
+
+              // Fine-tuning offsets for tiny provinces so text doesn't overlap
+              let labelX = cx;
+              let labelY = cy;
+
+              if (item.shortName === '北京') { labelX = cx - 2; labelY = cy - 2; }
+              if (item.shortName === '天津') { labelX = cx + 8; labelY = cy + 8; }
+              if (item.shortName === '上海') { labelX = cx + 12; labelY = cy + 4; }
+              if (item.shortName === '香港') { labelX = cx + 10; labelY = cy + 12; }
+              if (item.shortName === '澳门') { labelX = cx - 12; labelY = cy + 14; }
+
+              return (
+                <text
+                  key={`label-${item.id}`}
+                  x={labelX}
+                  y={labelY}
+                  textAnchor="middle"
+                  dominantBaseline="central"
+                  fill="#f8fafc"
+                  fontSize={
+                    ['新疆', '西藏', '内蒙古', '黑龙江', '青海', '四川'].includes(item.shortName)
+                      ? '13'
+                      : '11'
+                  }
+                  fontWeight="bold"
+                  className="font-sans tracking-tight select-none"
+                  style={{
+                    textShadow: '0px 1px 4px rgba(0, 0, 0, 0.95), 0px 0px 2px rgba(0, 0, 0, 0.8)',
+                  }}
+                >
+                  {item.shortName}
+                </text>
+              );
+            })}
+          </g>
+
+          {/* Render City Nodes */}
+          <g className="city-nodes-layer">
             {CITY_NODES.map((city) => {
-              const adjustedStores = Math.max(1, Math.round(city.stores * brandScale));
+              if (!city.lat || !city.lng) return null;
+              const [px, py] = projection([city.lng, city.lat]) || [0, 0];
+              if (px === 0 && py === 0) return null;
+
               const isHotspot = city.isHotspot;
 
               return (
                 <g
                   key={city.id}
-                  transform={`translate(${city.x}, ${city.y})`}
+                  transform={`translate(${px}, ${py})`}
                   className="cursor-pointer group"
+                  onClick={() => {
+                    const pData = getProvinceDataByName(city.provinceName);
+                    if (pData) onSelectProvince(pData);
+                  }}
                 >
-                  {/* Radar Ripple Animation */}
+                  {/* Outer Pulsing Ring */}
                   {isHotspot && (
                     <circle
-                      r="16"
+                      r="10"
                       fill="none"
-                      stroke="#38bdf8"
+                      stroke="#06b6d4"
                       strokeWidth="1.5"
-                      className="animate-map-pulse origin-center"
+                      className="animate-ping opacity-75 origin-center"
                     />
                   )}
-                  <circle
-                    r="10"
-                    fill="none"
-                    stroke="#0284c7"
-                    strokeWidth="1"
-                    className="animate-map-pulse-slow origin-center opacity-60"
-                  />
 
-                  {/* Node Dot */}
+                  {/* City Marker Point */}
                   <circle
                     r={isHotspot ? '5' : '3.5'}
-                    fill={isHotspot ? '#38bdf8' : '#0284c7'}
-                    filter="url(#node-glow)"
+                    fill={isHotspot ? '#ef4444' : '#06b6d4'}
+                    stroke="#ffffff"
+                    strokeWidth="1.2"
+                    filter="url(#city-glow)"
                     className="transition-transform group-hover:scale-150"
                   />
 
-                  {/* City Label Badge */}
-                  <g transform="translate(10, -8)">
-                    <rect
-                      x="0"
-                      y="0"
-                      width={city.name.length * 12 + (adjustedStores > 9 ? 38 : 32)}
-                      height="18"
-                      rx="4"
-                      fill="#020617"
-                      fillOpacity="0.85"
-                      stroke="#1e293b"
-                      strokeWidth="1"
-                    />
-                    <text
-                      x="6"
-                      y="13"
-                      fill="#f8fafc"
-                      fontSize="11"
-                      fontWeight="600"
-                      className="font-sans tracking-wide"
-                    >
-                      {city.name}
-                    </text>
-                    <text
-                      x={city.name.length * 12 + 10}
-                      y="13"
-                      fill="#38bdf8"
-                      fontSize="10"
-                      fontWeight="bold"
-                    >
-                      {adjustedStores}店
-                    </text>
-                  </g>
-
-                  {/* Dynamic Floating Live Bubble over city */}
+                  {/* Active Speech Bubble */}
                   {activeBubble?.cityId === city.id && (
-                    <g
-                      transform="translate(-50, -42)"
-                      className="animate-bounce transition-all duration-300"
-                    >
+                    <g transform="translate(-65, -34)" className="animate-bounce">
                       <rect
                         x="0"
                         y="0"
-                        width="140"
-                        height="26"
-                        rx="13"
+                        width="130"
+                        height="22"
+                        rx="11"
                         fill="#030712"
                         stroke="#06b6d4"
                         strokeWidth="1.5"
-                        className="shadow-[0_0_15px_rgba(6,182,212,0.6)]"
+                        className="shadow-2xl"
                       />
                       <text
-                        x="70"
-                        y="17"
+                        x="65"
+                        y="14"
                         textAnchor="middle"
                         fill="#22d3ee"
-                        fontSize="10"
+                        fontSize="9.5"
                         fontWeight="bold"
                       >
                         {activeBubble.text}
@@ -304,18 +419,55 @@ export const ChinaMap: React.FC<ChinaMapProps> = ({
               );
             })}
           </g>
+
+          {/* Inset Box: South China Sea Islands (南海诸岛) */}
+          <g transform="translate(840, 580)" className="south-china-sea-inset">
+            <rect
+              x="0"
+              y="0"
+              width="135"
+              height="180"
+              fill="#090d16"
+              fillOpacity="0.9"
+              stroke="#334155"
+              strokeWidth="1"
+              rx="8"
+            />
+            <text
+              x="67.5"
+              y="18"
+              textAnchor="middle"
+              fill="#94a3b8"
+              fontSize="10.5"
+              fontWeight="bold"
+            >
+              南海诸岛
+            </text>
+
+            {/* Nine-Dash Line graphic */}
+            <g stroke="#0284c7" strokeWidth="1.5" fill="none">
+              <path d="M 30 35 Q 40 45 35 55" strokeDasharray="3 2" />
+              <path d="M 60 50 Q 75 60 70 85" strokeDasharray="3 2" />
+              <path d="M 90 60 Q 105 80 100 120" strokeDasharray="3 2" />
+              <path d="M 45 100 Q 55 125 50 145" strokeDasharray="3 2" />
+            </g>
+
+            <circle cx="50" cy="70" r="2" fill="#ef4444" />
+            <circle cx="80" cy="95" r="2" fill="#ef4444" />
+            <circle cx="65" cy="130" r="2" fill="#ef4444" />
+          </g>
         </svg>
 
         {/* Hover Tooltip Card */}
         {hoveredProvince && (
           <div
-            className="absolute z-30 pointer-events-none transition-all duration-75 text-xs bg-slate-900/95 border border-cyan-500/50 rounded-xl p-3 shadow-2xl backdrop-blur-md min-w-[200px]"
+            className="absolute z-30 pointer-events-none transition-all duration-75 text-xs rounded-xl p-3 shadow-2xl backdrop-blur-md min-w-[210px] bg-slate-900/95 text-white border border-cyan-500/50"
             style={{
-              left: Math.min(hoverPos.x + 15, 600),
-              top: Math.min(hoverPos.y + 15, 400),
+              left: Math.min(hoverPos.x + 15, 620),
+              top: Math.min(hoverPos.y + 15, 420),
             }}
           >
-            <div className="flex items-center justify-between border-b border-slate-800 pb-2 mb-2">
+            <div className="flex items-center justify-between border-b border-slate-700 pb-2 mb-2">
               <span className="font-bold text-sm text-cyan-300 flex items-center gap-1.5">
                 <Building2 className="w-4 h-4 text-cyan-400" />
                 {hoveredProvince.name}
@@ -352,71 +504,67 @@ export const ChinaMap: React.FC<ChinaMapProps> = ({
               </div>
             </div>
 
-            <div className="mt-2 pt-2 border-t border-slate-800/80 text-[10px] text-slate-400 flex items-center justify-between">
+            <div className="mt-2 pt-2 border-t border-slate-800 text-[10px] text-slate-400 flex items-center justify-between">
               <span>主要品牌: {hoveredProvince.brands.slice(0, 3).join(', ')}</span>
-              <span className="text-cyan-400 underline">点击查看详情</span>
+              <span className="text-cyan-400 font-semibold underline">点击明细</span>
             </div>
           </div>
         )}
+      </div>
 
-        {/* Realtime Live Status Overlay Widget (Bottom Left of Map) */}
-        <div className="absolute bottom-3 left-3 z-20 bg-slate-900/90 border border-cyan-500/30 rounded-xl p-3.5 backdrop-blur-md max-w-xs shadow-xl hidden lg:block">
-          <div className="flex items-center justify-between border-b border-slate-800/80 pb-2 mb-2.5">
-            <div className="flex items-center space-x-2">
-              <span className="relative flex h-2.5 w-2.5">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
-              </span>
-              <span className="text-xs font-bold text-slate-200 tracking-wider">
-                今日智能工牌实时状态
-              </span>
+      {/* Realtime Live Status Floating Overlay Widget (Bottom Left) */}
+      <div className="absolute bottom-3 left-3 z-20 border border-slate-800/80 rounded-xl p-3 backdrop-blur-md max-w-xs shadow-xl hidden sm:block bg-slate-900/90 text-white">
+        <div className="flex items-center justify-between border-b pb-2 mb-2 border-slate-800">
+          <div className="flex items-center space-x-2">
+            <span className="relative flex h-2.5 w-2.5">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
+            </span>
+            <span className="text-xs font-bold tracking-wider text-slate-200">智能工牌实时数据流</span>
+          </div>
+
+          <div className="flex items-end space-x-1 h-3.5 px-1 bg-slate-950 rounded border border-slate-800">
+            <span className="w-1 bg-cyan-400 rounded-full animate-audio-bar-1" />
+            <span className="w-1 bg-cyan-400 rounded-full animate-audio-bar-2" />
+            <span className="w-1 bg-cyan-400 rounded-full animate-audio-bar-3" />
+            <span className="w-1 bg-cyan-400 rounded-full animate-audio-bar-4" />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2 text-xs">
+          <div className="p-1.5 rounded-lg border bg-slate-950/60 border-slate-800">
+            <div className="text-[10px] text-slate-400 flex items-center gap-1">
+              <Users className="w-3 h-3 text-cyan-400" /> 在线工牌
             </div>
-
-            {/* Audio Wave Bar Animation */}
-            <div className="flex items-end space-x-1 h-5 px-1 bg-slate-950/60 rounded border border-slate-800">
-              <span className="w-1 bg-cyan-400 rounded-full animate-audio-bar-1" />
-              <span className="w-1 bg-cyan-400 rounded-full animate-audio-bar-2" />
-              <span className="w-1 bg-cyan-400 rounded-full animate-audio-bar-3" />
-              <span className="w-1 bg-cyan-400 rounded-full animate-audio-bar-4" />
-              <span className="w-1 bg-cyan-400 rounded-full animate-audio-bar-5" />
+            <div className="text-xs font-black text-cyan-300 mt-0.5">
+              {Math.round(onlineBadges * brandScale).toLocaleString()}
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-2 text-xs">
-            <div className="bg-slate-950/50 p-2 rounded-lg border border-slate-800">
-              <div className="text-[10px] text-slate-400 flex items-center gap-1">
-                <Users className="w-3 h-3 text-cyan-400" /> 当前在线工牌
-              </div>
-              <div className="text-sm font-black text-cyan-300 mt-0.5">
-                {Math.round(onlineBadges * brandScale).toLocaleString()}
-              </div>
+          <div className="p-1.5 rounded-lg border bg-slate-950/60 border-slate-800">
+            <div className="text-[10px] text-slate-400 flex items-center gap-1">
+              <Activity className="w-3 h-3 text-emerald-400" /> 实时会话
             </div>
-
-            <div className="bg-slate-950/50 p-2 rounded-lg border border-slate-800">
-              <div className="text-[10px] text-slate-400 flex items-center gap-1">
-                <Activity className="w-3 h-3 text-emerald-400" /> 实时会话中
-              </div>
-              <div className="text-sm font-black text-emerald-400 mt-0.5">
-                {Math.round(activeConversations * brandScale).toLocaleString()}
-              </div>
+            <div className="text-xs font-black text-emerald-400 mt-0.5">
+              {Math.round(activeConversations * brandScale).toLocaleString()}
             </div>
+          </div>
 
-            <div className="bg-slate-950/50 p-2 rounded-lg border border-slate-800">
-              <div className="text-[10px] text-slate-400 flex items-center gap-1">
-                <Mic className="w-3 h-3 text-amber-400" /> 今日累计会话
-              </div>
-              <div className="text-sm font-black text-amber-300 mt-0.5">
-                {Math.round(todaySessions * brandScale).toLocaleString()}
-              </div>
+          <div className="p-1.5 rounded-lg border bg-slate-950/60 border-slate-800">
+            <div className="text-[10px] text-slate-400 flex items-center gap-1">
+              <Mic className="w-3 h-3 text-amber-400" /> 今日会话
             </div>
+            <div className="text-xs font-black text-amber-300 mt-0.5">
+              {Math.round(todaySessions * brandScale).toLocaleString()}
+            </div>
+          </div>
 
-            <div className="bg-slate-950/50 p-2 rounded-lg border border-slate-800">
-              <div className="text-[10px] text-slate-400 flex items-center gap-1">
-                <Cpu className="w-3 h-3 text-purple-400" /> 今日录音时长
-              </div>
-              <div className="text-sm font-black text-purple-300 mt-0.5">
-                {Math.round(totalAudioHours * brandScale).toLocaleString()} 小时
-              </div>
+          <div className="p-1.5 rounded-lg border bg-slate-950/60 border-slate-800">
+            <div className="text-[10px] text-slate-400 flex items-center gap-1">
+              <Cpu className="w-3 h-3 text-purple-400" /> 录音时长
+            </div>
+            <div className="text-xs font-black text-purple-300 mt-0.5">
+              {Math.round(totalAudioHours * brandScale).toLocaleString()}h
             </div>
           </div>
         </div>

@@ -20,6 +20,8 @@ export interface CityNode {
   todaySessions: number;
   x: number; // percentage in SVG viewport (0-1000)
   y: number; // percentage in SVG viewport (0-800)
+  lat?: number;
+  lng?: number;
   isHotspot?: boolean;
 }
 
@@ -34,12 +36,16 @@ export interface ProvinceData {
   coveredBrandsCount: number;
   densityLevel: 'high' | 'medium' | 'low' | 'none'; // for color map scale
   brands: string[];
+  lat?: number;
+  lng?: number;
   cities: {
     name: string;
     stores: number;
     badges: number;
     activeUsers: number;
     todaySessions: number;
+    lat?: number;
+    lng?: number;
   }[];
   svgD?: string; // Geo SVG path string
 }
